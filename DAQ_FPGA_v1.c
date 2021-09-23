@@ -1,0 +1,476 @@
+////////////////////////////////////////////////////////////////////////////////
+//DAQ-FPGA_v1
+//Purpose:develop a new code that works as follows: first we must receive two
+//        data streams as input, then these data must be read to finally be
+//        stored in two independent outputs.
+//Author: Franz Machado
+////////////////////////////////////////////////////////////////////////////////
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdbool.h>
+#include <semaphore.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+////////////////////////////////////////////////////////////////////////////////
+#define NUM_THREADS 4    // 5 insted 3
+#define BUFFER_SIZE 750
+////////////////////////////////////////////////////////////////////////////////
+int data_write[BUFFER_SIZE];
+int data_write_stream_1[BUFFER_SIZE];  // change
+int data_write_stream_2[BUFFER_SIZE];  // change
+
+int buffer_data[BUFFER_SIZE];
+int buffer_data_stream_1[BUFFER_SIZE];  // change
+int buffer_data_stream_2[BUFFER_SIZE];  // change
+
+int empty[BUFFER_SIZE];
+int empty1[BUFFER_SIZE];
+
+int empty_stream_1[BUFFER_SIZE];  //data must be copied here
+int empty_stream_2[BUFFER_SIZE];  //and here, then it must be copied to joint_data_empty
+int joint_data_empty[2*BUFFER_SIZE];   //something like this maybe empty_stream_1 and ..._2
+
+int* write_p;
+int* read_p;
+
+int* write_p_1;          //to stream 1
+int* read_p_1;
+
+int* write_p_2;          //to stream 2
+int* read_p_2;
+
+int* write_temp;
+int* write_temp_1;      //to stream 1
+int* write_temp_2;      //to stream 2
+
+bool write_d = true;
+
+bool write_d_1 = true;  //to stream 1
+bool write_d_2 = true;  //to stream 2
+
+int* read_temp;      //it is not used in the code ????
+
+pthread_mutex_t lock;
+int r_fpga =0;
+int r_stream_1=0;   /////
+int r_stream_2=0;   /////
+bool done = false;
+bool done_1 = false;    /////
+bool done_2 = false;    /////
+bool fpga_done = true;
+bool stream_1_done = true;   //////
+bool stream_2_done = true;   //////
+int r_eb = 0;
+void write_func(void *argument);
+void write_func_stream_1(void *argument);    //function to introduce data to stream 1
+void write_func_stream_2(void *argument);    //function to introduce data to stream 2
+
+void read_func(void *argument);
+void read_func_stream_1(void *argument);     //function to read the stream 1
+void read_func_stream_2(void *argument);     //function to read the stream 2
+
+int fd;
+int fd1;
+int fd2;
+////////////////////////////////////////////////////////////////////////////////
+typedef struct thdata_type
+{
+int thread_no;
+int* data_storage;
+} thdata;
+////////////////////////////////////////////////////////////////////////////////
+int main(int argc, char *argv[])
+{
+
+pthread_mutex_init(&lock, NULL);
+fd = open("mysync.out",O_RDWR|O_CREAT, S_IRWXU);  /// description of mysync.out; what does mysync.out contains?
+//If you want read/write/execute permission for the current user/owner use: S_IRWXU
+if (fd<0) {perror("Open"); exit(2);}
+
+fd1 = open("stream1.out",O_RDWR|O_CREAT, S_IRWXU);  /// description of mysync.out; what does mysync.out contains?
+//If you want read/write/execute permission for the current user/owner use: S_IRWXU
+if (fd1<0) {perror("Open"); exit(2);}
+
+fd2 = open("stream2.out",O_RDWR|O_CREAT, S_IRWXU);  /// description of mysync.out; what does mysync.out contains?
+//If you want read/write/execute permission for the current user/owner use: S_IRWXU
+if (fd2<0) {perror("Open"); exit(2);}
+/////////////////////////////////////////
+
+/////////////////////////////////////////
+
+
+for(int x = 0; x < sizeof(data_write)/4; ++x){
+//data_write[x] = x;
+data_write_stream_1[x] = x;  //change
+data_write_stream_2[x] = x + 10000;  //change
+}
+
+pthread_t threads[NUM_THREADS];
+thdata stream_1 = {0, &data_write_stream_1[0]};  //change
+thdata stream_2 = {1, &data_write_stream_2[0]};  //change
+thdata saved_data_1 = {2, &empty_stream_1[0]};
+thdata saved_data_2 = {3, &empty_stream_2[0]};
+
+int thread_args[4];
+
+for (int r=0; r<NUM_THREADS; ++r){
+thread_args[r] = r;
+printf("In main: creating thread %d\n", r);
+}
+
+//create all threads
+pthread_create(&threads[0], NULL, (void *) &write_func_stream_1,(void *) &stream_1);
+pthread_create(&threads[1], NULL, (void *) &write_func_stream_2,(void *) &stream_2);
+pthread_create(&threads[2], NULL, (void *) &read_func_stream_1, (void *) &saved_data_1);
+pthread_create(&threads[3], NULL, (void *) &read_func_stream_2, (void *) &saved_data_2);
+
+// wait for all threads to complete
+pthread_join(threads[0], NULL);
+pthread_join(threads[1], NULL);
+pthread_join(threads[2], NULL);
+pthread_join(threads[3], NULL);
+
+pthread_mutex_destroy(&lock);
+exit(EXIT_SUCCESS);
+
+}
+
+////////////////////////////////////////////////////////////////////////////////
+void write_func_stream_1(void *argument)
+{
+
+int* temp_r_s1 = &buffer_data_stream_1[0];
+int* temp_w_s1 = &buffer_data_stream_1[0];
+int i_write_s1 = 0;
+int diff_s1;
+int* first_el_s1 = &buffer_data_stream_1[0];
+int* last_el_s1 = first_el_s1 + BUFFER_SIZE;
+
+pthread_mutex_lock(&lock);
+write_p_1 = &buffer_data_stream_1[0];   //write_p es puntero
+read_p_1 = &buffer_data_stream_1[0];
+pthread_mutex_unlock(&lock);
+
+int buff_size = sizeof(buffer_data)/4;  //sizeof(buffer_data) = 3000; int size = 4
+thdata *data_s1 = (thdata*) argument;
+
+////////////////////////////////////
+while(1){
+
+pthread_mutex_lock(&lock);
+temp_r_s1 = read_p_1;
+temp_w_s1 = write_p_1;
+printf("Write (stream 1): temp_r_s1 %x temp_w_s1 %x\n", temp_r_s1, temp_w_s1);
+pthread_mutex_unlock(&lock);
+
+diff_s1 = 0;
+/////////////////
+if(temp_r_s1 < temp_w_s1 || i_write_s1<=1){
+
+diff_s1 = (int)(((last_el_s1 - temp_w_s1) + (temp_r_s1 - first_el_s1)));
+printf("diff_s1_1 %d  \n", diff_s1);
+
+}else if(temp_r_s1 > temp_w_s1){
+
+diff_s1 = (int)((temp_r_s1 - temp_w_s1));
+printf("diff_s1_2 %d \n", diff_s1 );
+
+}else if(temp_r_s1 == temp_w_s1 && done_1){
+
+diff_s1 = (int)(((last_el_s1 - temp_w_s1) + (temp_r_s1 - first_el_s1)));
+printf("diff_s1_3 %d \n", diff_s1);
+
+}
+///////////////////
+int slots_to_be_written = diff_s1/4;
+printf("Writing %d slots\n",slots_to_be_written);
+
+//printf("LOL1.1\n");
+
+pthread_mutex_lock(&lock);
+
+//printf("LOL1.2\n");
+
+for(int slots = 0; slots < slots_to_be_written; ++slots){
+buffer_data_stream_1[i_write_s1%BUFFER_SIZE] = data_s1->data_storage[i_write_s1%BUFFER_SIZE];
+printf("i_write_s1 (stream 1) is %d buffer_data_stream_1[i_write_s1%BUFFER_SIZE] %d\n", i_write_s1,buffer_data_stream_1[i_write_s1%BUFFER_SIZE]);
+i_write_s1++;
+}
+
+//printf("LOL1.3\n");
+
+write_p_1 = &buffer_data_stream_1[(i_write_s1)%(buff_size)];
+write_d_1 = false;
+printf("i_write_s1%buff_size %d\n",i_write_s1%(buff_size));
+pthread_mutex_unlock(&lock);
+usleep(400);
+
+}
+////////////////////////////////////
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+void write_func_stream_2(void *argument)
+{
+
+int* temp_r_s2 = &buffer_data_stream_2[0];
+int* temp_w_s2 = &buffer_data_stream_2[0];
+int i_write_s2 = 0;
+int diff_s2;
+int* first_el_s2 = &buffer_data_stream_2[0];
+int* last_el_s2 = first_el_s2 + BUFFER_SIZE;
+
+pthread_mutex_lock(&lock);
+write_p_2 = &buffer_data_stream_2[0];   //write_p es puntero
+read_p_2 = &buffer_data_stream_2[0];
+pthread_mutex_unlock(&lock);
+
+int buff_size = sizeof(buffer_data)/4;  //sizeof(buffer_data) = 3000; int size = 4
+thdata *data_s2 = (thdata*) argument;
+
+////////////////////////////////////
+while(1){
+
+pthread_mutex_lock(&lock);
+temp_r_s2 = read_p_2;
+temp_w_s2 = write_p_2;
+printf("Write (stream 2): temp_r_s2 %x temp_w_s2 %x\n", temp_r_s2, temp_w_s2);
+pthread_mutex_unlock(&lock);
+
+diff_s2 = 0;
+/////////////////
+if(temp_r_s2 < temp_w_s2 || i_write_s2<=1){
+
+diff_s2 = (int)(((last_el_s2 - temp_w_s2) + (temp_r_s2 - first_el_s2)));
+printf("diff_s2_1 %d  \n", diff_s2);
+
+}else if(temp_r_s2 > temp_w_s2){
+
+diff_s2 = (int)((temp_r_s2 - temp_w_s2));
+printf("diff_s2_2 %d \n", diff_s2 );
+
+}else if(temp_r_s2 == temp_w_s2 && done_2){
+
+diff_s2 = (int)(((last_el_s2 - temp_w_s2) + (temp_r_s2 - first_el_s2)));
+printf("diff_s2_3 %d \n", diff_s2);
+
+}
+///////////////////
+int slots_to_be_written = diff_s2/4;
+printf("Writing %d slots\n",slots_to_be_written);
+
+//printf("LOL1.1\n");
+
+pthread_mutex_lock(&lock);
+
+//printf("LOL1.2\n");
+
+for(int slots = 0; slots < slots_to_be_written; ++slots){
+buffer_data_stream_2[i_write_s2%BUFFER_SIZE] = data_s2->data_storage[i_write_s2%BUFFER_SIZE];
+printf("i_write_s2 (stream 2) is %d buffer_data_stream_2[i_write_s2%BUFFER_SIZE] %d\n", i_write_s2,buffer_data_stream_2[i_write_s2%BUFFER_SIZE]);
+i_write_s2++;
+}
+
+//printf("LOL1.3\n");
+
+write_p_2 = &buffer_data_stream_2[(i_write_s2)%(buff_size)];
+write_d_2 = false;
+printf("i_write_s2%buff_size %d\n",i_write_s2%(buff_size));
+pthread_mutex_unlock(&lock);
+usleep(400);
+
+}
+////////////////////////////////////
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+void read_func_stream_1(void *argument)
+{
+int* temp_r1_s1 = &buffer_data_stream_1[0];
+int* temp_w1_s1 = &buffer_data_stream_1[0];
+int diff1_s1;
+int* first_el1_s1 = &buffer_data_stream_1[0];
+int* last_el1_s1 = first_el1_s1 + BUFFER_SIZE;
+
+while(1){
+
+thdata *temp_s1 = (thdata*) argument;
+int th_no_s1 = temp_s1->thread_no;
+
+pthread_mutex_lock(&lock);
+temp_r1_s1 = read_p_1;
+temp_w1_s1 = write_p_1;
+printf("Thr %d Read:  temp_r %x temp_w %x\n", th_no_s1,temp_r1_s1, temp_w1_s1);
+//printf("Thr %d done is %d fpga_done is %d\n", th_no,done_2,stream_2_done); //fpga_done -> stream_1_done
+printf("copying data from stream 1 (consumer)");
+pthread_mutex_unlock(&lock);
+
+//if(th_no == 3 && !fpga_done){
+if(th_no_s1 == 2){
+
+pthread_mutex_lock(&lock);
+write_temp_1 = temp_w1_s1;
+pthread_mutex_unlock(&lock);
+
+diff1_s1=0;
+if(temp_r1_s1 < write_temp_1){
+
+diff1_s1 = (int)(write_temp_1 - temp_r1_s1);
+printf("Thr %d (stream 1) 1st diff1 %d \n", th_no_s1,diff1_s1);
+
+}else if(temp_r1_s1 >= write_temp_1){
+
+diff1_s1 = (int)((last_el1_s1 - temp_r1_s1) + (write_temp_1 - first_el1_s1));
+printf("Thr %d (stream 1) 2nd diff1_s1 %d \n", th_no_s1,diff1_s1);
+
+}
+
+int slots_to_be_read = (int) diff1_s1;
+printf("Thr %d (stream 1) Reading by st_1 %d slots \n", th_no_s1,slots_to_be_read);  //??
+
+pthread_mutex_lock(&lock);
+int *wr_pnt = &(temp_s1->data_storage[r_stream_1%BUFFER_SIZE]);
+for(int slots1 = 0; slots1 < slots_to_be_read; ++slots1){
+  temp_s1->data_storage[r_stream_1%BUFFER_SIZE] = buffer_data_stream_1[r_stream_1%BUFFER_SIZE];
+  joint_data_empty[(r_stream_1+r_stream_2)%(2*BUFFER_SIZE)] = buffer_data_stream_1[r_stream_1%BUFFER_SIZE];
+  if (slots1==0) printf("temp_storage %d buffer_data %d\n",temp_s1->data_storage[r_stream_1%BUFFER_SIZE], buffer_data_stream_1[r_stream_1%BUFFER_SIZE]);
+  r_stream_1++;
+}
+
+printf("Thr %d Done reading by st_1 \n",th_no_s1);
+read_p_1 = write_temp_1;
+printf("Thr %d read_p after assignment %d \n", th_no_s1,read_p_1);
+done_1 = true;
+stream_1_done = true;
+write_d_1 = true;
+int end = (int) (&temp_s1->data_storage[BUFFER_SIZE] - wr_pnt)*4;
+
+if (slots_to_be_read*4 <= end) end = slots_to_be_read*4;
+
+printf ("(stream 1): start end len %d %d %d\n", &temp_s1->data_storage[BUFFER_SIZE], wr_pnt, end);
+int ret = write(fd1, wr_pnt,end);
+int dum = -1;
+ret = write(fd1, &dum,4);
+
+if (slots_to_be_read*4 != end) ret = write(fd1, &temp_s1->data_storage[0],slots_to_be_read*4 - end);
+//printf ("xd");
+dum = -2;
+ret = write(fd1, &dum,4);
+
+if (ret<0) {perror("Write");}
+
+pthread_mutex_unlock(&lock);
+
+printf("r_stream_1 is %d, %d\n", r_stream_1%BUFFER_SIZE, r_stream_1);
+}
+
+//for(int slots = 0; slots < 1500; ++slots){
+//printf("joint_data_empty[%d] = %d\n", slots, joint_data_empty[slots] );
+//}
+
+printf("joint_data_empty[1499] = %d\n",joint_data_empty[1499] );
+
+usleep(400);
+}
+
+}
+
+
+////////////////////////////////////////////////////////////////////////////////
+
+void read_func_stream_2(void *argument)
+{
+int* temp_r1_s2 = &buffer_data_stream_2[0];
+int* temp_w1_s2 = &buffer_data_stream_2[0];
+int diff1_s2;
+int* first_el1_s2 = &buffer_data_stream_2[0];
+int* last_el1_s2 = first_el1_s2 + BUFFER_SIZE;
+
+while(1){
+
+thdata *temp_s2 = (thdata*) argument;
+int th_no_s2 = temp_s2->thread_no;
+
+pthread_mutex_lock(&lock);
+temp_r1_s2 = read_p_2;
+temp_w1_s2 = write_p_2;
+printf("Thr %d Read:  temp_r %x temp_w %x\n", th_no_s2,temp_r1_s2, temp_w1_s2);
+//printf("Thr %d done is %d fpga_done is %d\n", th_no,done_2,stream_2_done); //fpga_done -> stream_1_done
+printf("copying data from stream 2 (consumer)");
+pthread_mutex_unlock(&lock);
+
+//if(th_no == 3 && !fpga_done){
+if(th_no_s2 == 3){
+
+pthread_mutex_lock(&lock);
+write_temp_2 = temp_w1_s2;
+pthread_mutex_unlock(&lock);
+
+diff1_s2=0;
+if(temp_r1_s2 < write_temp_2){
+
+diff1_s2 = (int)(write_temp_2 - temp_r1_s2);
+printf("Thr %d (stream 2) 1st diff1 %d \n", th_no_s2,diff1_s2);
+
+}else if(temp_r1_s2 >= write_temp_2){
+
+diff1_s2 = (int)((last_el1_s2 - temp_r1_s2) + (write_temp_2 - first_el1_s2));
+printf("Thr %d (stream 2) 2nd diff1 %d \n", th_no_s2,diff1_s2);
+
+}
+
+int slots_to_be_read = (int) diff1_s2;
+printf("Thr %d Reading by st_2 %d slots \n", th_no_s2,slots_to_be_read);  //??
+
+pthread_mutex_lock(&lock);
+int *wr_pnt = &(temp_s2->data_storage[r_stream_2%BUFFER_SIZE]);
+
+for(int slots1 = 0; slots1 < slots_to_be_read; ++slots1){
+  temp_s2->data_storage[r_stream_2%BUFFER_SIZE] = buffer_data_stream_2[r_stream_2%BUFFER_SIZE];
+  joint_data_empty[(r_stream_1+r_stream_2)%(2*BUFFER_SIZE)] = buffer_data_stream_2[r_stream_2%BUFFER_SIZE];  //we store the data of both streams here
+  if (slots1==0) printf("temp_storage %d buffer_data %d\n",temp_s2->data_storage[r_stream_2%BUFFER_SIZE], buffer_data_stream_2[r_stream_2%BUFFER_SIZE]);
+  r_stream_2++;
+}
+
+printf("Thr %d Done reading by st_2 \n",th_no_s2);
+read_p_2 = write_temp_2;
+printf("Thr %d read_p after assignment %d \n", th_no_s2,read_p_2);
+done_2 = true;
+stream_2_done = true;
+write_d_2 = true;
+int end = (int) (&temp_s2->data_storage[BUFFER_SIZE] - wr_pnt)*4;
+
+if (slots_to_be_read*4 <= end) end = slots_to_be_read*4;
+
+printf ("(stream 2): start end len %d %d %d\n", &temp_s2->data_storage[BUFFER_SIZE], wr_pnt, end);
+int ret = write(fd2, wr_pnt,end);
+int dum = -1;
+ret = write(fd2, &dum,4);
+
+if (slots_to_be_read*4 != end) ret = write(fd2, &temp_s2->data_storage[0],slots_to_be_read*4 - end);
+//printf ("xd");
+dum = -2;
+ret = write(fd2, &dum,4);
+
+if (ret<0) {perror("Write");}
+
+pthread_mutex_unlock(&lock);
+
+printf("r_stream_2 is %d, %d\n", r_stream_2%BUFFER_SIZE, r_stream_2);
+}
+
+//for(int slots = 0; slots < 1500; ++slots){
+//printf("joint_data_empty[%d] = %d\n", slots, joint_data_empty[slots] );
+//}
+
+printf("joint_data_empty[1499] = %d\n",joint_data_empty[1499] );
+
+usleep(400);
+}
+
+}
