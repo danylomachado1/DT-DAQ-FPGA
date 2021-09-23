@@ -2,7 +2,6 @@
 //Base code
 //Purpose:simulate the data read and write synchronization mechanism between the
 //        emulated PCIe40 card, FPGA accelerator, Buffer, and the EB.
-//Author:Yara Al-Quorashy  
 ////////////////////////////////////////////////////////////////////////////////
 #include <pthread.h>
 #include <stdio.h>
